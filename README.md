@@ -28,5 +28,9 @@ python generate.py --nasabah 5000 --transaksi 200000
 | MySQL channel | 3307 |
 | MongoDB | 27017 |
 
+> Port sengaja dipindah agar tidak bentrok dengan database lokal.
+> Di Windows (PowerShell), muat `.env` dengan:
+> `Get-Content ..\.env | ForEach-Object { if ($_ -match '^\s*([^#=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim(), 'Process') } }`
+
 ## Model data (star schema)
 `fact_transaksi` dikelilingi `dim_waktu`, `dim_nasabah` (SCD2), `dim_produk`, `dim_cabang`, `dim_channel`.
