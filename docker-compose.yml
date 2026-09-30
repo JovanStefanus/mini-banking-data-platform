@@ -1,6 +1,7 @@
 
 include:
   - docker-compose.bi.yml
+  - docker-compose.trino.yml
 # Fase 1: source systems + Data Warehouse
 services:
   postgres_core:            # simulasi core banking

@@ -1,6 +1,6 @@
 # Mini Banking Data Platform
 
-Simulasi platform data ala perbankan: data dari beberapa sumber diproses lewat pipeline ETL ke **data warehouse (star schema)**, lengkap dengan **SCD Type 2**, **incremental load**, **audit log**, dan **data quality check**. Data warehouse dilayani lewat **REST API read-only** berbasis Java Spring Boot.
+Simulasi platform data ala perbankan: data dari beberapa sumber diproses lewat pipeline ETL ke **data warehouse (star schema)**, lengkap dengan **SCD Type 2**, **incremental load**, **audit log**, dan **data quality check**. Data warehouse dilayani lewat **REST API** (Java Spring Boot), **semantic layer + dashboard** (Metabase), dan **data virtualization** (Trino).
 
 > **Semua data adalah data sintetis** (dibuat dengan Faker). Tidak ada data nasabah asli, dan NIK sudah dimasking.
 
@@ -11,25 +11,26 @@ Project portofolio untuk peran Data Engineer / Developer.
 - [x] **Fase 1** – Source database (PostgreSQL, MySQL, MongoDB), skema DWH, generator data sintetis
 - [x] **Fase 2** – Pipeline ETL ke DWH (SCD2, incremental load, audit log, data quality)
 - [x] **Fase 3** – REST API Java Spring Boot (transaksi, master data nasabah, ringkasan harian)
-- [ ] **Fase 4** – Data virtualization (Trino), semantic layer, dashboard
-- [ ] **Fase 5** – Oracle/SQL Server sebagai sumber tambahan, Kubernetes, CI/CD, orkestrasi Airflow
+- [x] **Fase 4a** – Semantic layer (view bisnis) dan dashboard Metabase
+- [x] **Fase 4b** – Data virtualization dengan Trino (query lintas PostgreSQL, MySQL, MongoDB)
+- [ ] **Fase 5** – Muat MySQL/MongoDB ke DWH dan API master data, orkestrasi Airflow, unit test/Swagger/CI, Oracle/SQL Server, Kubernetes
 
 ## Arsitektur
 
 ```
- Source systems               ETL (Python)               Data Warehouse (PostgreSQL)        Serving
-┌──────────────────┐        ┌──────────────────┐        ┌──────────────────────────┐     ┌──────────────────┐
-│ PostgreSQL       │        │ Extract          │        │ staging (data mentah)    │     │ REST API         │
-│ core banking     │───────►│  → staging       │───────►│ dwh     (star schema)    │────►│ Java Spring Boot │
-├──────────────────┤        │ Transform & Load │        │ audit   (monitoring ETL) │     │ (read-only user) │
-│ MySQL   (channel)│  ....  │  → dimensi+fact  │        └──────────────────────────┘     └──────────────────┘
-│ MongoDB (log)    │        │ Data quality     │
-└──────────────────┘        │ Audit log        │
- (MySQL & MongoDB           └──────────────────┘
-  belum dimuat ke DWH)
+ Source systems             ETL (Python)        Data Warehouse (PostgreSQL)            Serving
+┌────────────────┐       ┌──────────────┐      ┌─────────────────────────────┐    ┌──────────────────┐
+│ PostgreSQL     │       │ Extract      │      │ staging  (data mentah)      │    │ REST API         │
+│ core banking   │──────►│ Transform    │─────►│ dwh      (star schema)      │───►│ Java Spring Boot │
+├────────────────┤       │ & Load       │      │ semantic (view bisnis)      │───►│ Metabase         │
+│ MySQL (channel)│  ...  │ Data quality │      │ audit    (monitoring ETL)   │    │ (dashboard)      │
+│ MongoDB (log)  │       │ Audit log    │      └─────────────────────────────┘    └──────────────────┘
+└───────▲────────┘       └──────────────┘
+        │
+        └── Trino (data virtualization): query lintas sumber tanpa memindahkan data
 ```
 
-Saat ini pipeline ETL memuat data dari **PostgreSQL core banking**. MySQL dan MongoDB sudah terisi data sintetis dan akan diintegrasikan pada fase berikutnya.
+Saat ini pipeline ETL memuat data dari **PostgreSQL core banking**. MySQL dan MongoDB sudah terisi data sintetis dan dapat dibaca langsung lewat Trino; memuatnya ke DWH direncanakan pada Fase 5.
 
 ## Tech stack
 
@@ -38,6 +39,8 @@ Saat ini pipeline ETL memuat data dari **PostgreSQL core banking**. MySQL dan Mo
 | Database | PostgreSQL 16, MySQL 8.4, MongoDB 7 |
 | ETL | Python (psycopg2), SQL |
 | REST API | Java 17, Spring Boot 4.1, JdbcTemplate, Maven |
+| BI / dashboard | Metabase |
+| Data virtualization | Trino |
 | Infrastruktur | Docker, Docker Compose |
 | Data sintetis | Faker |
 | Version control | Git, GitHub |
@@ -68,6 +71,66 @@ Tabel monitoring ada di schema `audit`: `etl_audit_log` dan `dq_check_result`.
 - **Koneksi sumber read-only**: ETL tidak bisa mengubah data core banking.
 
 Konvensi lengkap ada di [`docs/INGESTION_STANDARD.md`](docs/INGESTION_STANDARD.md).
+
+## Semantic layer dan dashboard
+
+Schema `semantic` berisi view bisnis di atas star schema. Definisi metrik ditulis **sekali** di view, sehingga semua laporan memakai angka yang sama dan analis tidak perlu memahami join star schema.
+
+| View | Isi |
+|---|---|
+| `v_transaksi` | Tabel lebar (fakta + dimensi) dengan nama kolom yang mudah dipahami |
+| `v_ringkasan_harian` | Jumlah, total, dan rata-rata nominal per hari |
+| `v_kinerja_cabang` | Jumlah dan total nominal per cabang |
+| `v_channel_mix` | Komposisi transaksi per channel (dengan persentase) |
+| `v_produk_ranking` | Peringkat produk berdasarkan total nominal |
+| `v_segmen_nasabah` | Jumlah nasabah, transaksi, dan nominal per segmen |
+
+`segmen_nasabah` adalah segmen yang berlaku **saat transaksi terjadi** (hasil SCD Type 2).
+
+Metabase memakai user `bi_reader` yang hanya boleh membaca schema `semantic`, tanpa akses ke `dwh`, `staging`, maupun `audit`.
+
+![Dashboard](docs/images/dashboard.png)
+
+### Menjalankan semantic layer dan Metabase
+
+```powershell
+# 1. Tambahkan BI_DB_PASSWORD di .env, lalu buat semantic layer dan user bi_reader (sekali saja)
+Get-Content sql\ops\create_semantic_layer.sql | docker exec -i mbdp_pg_dwh psql -U dwh_user -d dwh -v bi_pw=PASSWORD_BI
+
+# 2. Jalankan Metabase, lalu buka http://localhost:3000
+docker compose up -d
+```
+
+Saat menambahkan database di Metabase: Host `postgres_dwh`, Port `5432`, Database `dwh`, Username `bi_reader`, Schemas → *Only these...* → `semantic`.
+
+## Data virtualization (Trino)
+
+Trino menjalankan **satu query SQL yang menggabungkan beberapa sumber tanpa memindahkan data**. Empat catalog dikonfigurasi di folder `trino/catalog/`:
+
+| Catalog | Sumber |
+|---|---|
+| `core` | PostgreSQL core banking |
+| `mysql` | MySQL channel banking |
+| `mongodb` | MongoDB log aktivitas |
+| `dwh` | Data warehouse (hanya schema `semantic`, lewat `bi_reader`) |
+
+Contoh query lintas sumber ada di [`trino/queries/`](trino/queries/):
+
+| File | Menggabungkan |
+|---|---|
+| `02_postgres_mysql.sql` | PostgreSQL + MySQL: adopsi mobile banking per segmen nasabah |
+| `03_postgres_mongodb.sql` | PostgreSQL + MongoDB: aktivitas gagal per kota nasabah |
+| `04_tiga_sumber.sql` | DWH + PostgreSQL + MySQL dalam satu query |
+
+```powershell
+docker compose up -d
+Get-Content trino\queries\04_tiga_sumber.sql | docker exec -i mbdp_trino trino --output-format ALIGNED
+```
+
+Antarmuka web Trino ada di `http://localhost:8085` (username bebas, tanpa password).
+
+![Query lintas sumber](docs/images/trino_federated.png)
+![Antarmuka Trino](docs/images/trino_ui.png)
 
 ## REST API
 
@@ -133,6 +196,8 @@ python -m etl.run_pipeline
 
 Untuk Linux/macOS, ganti langkah 4 dengan `set -a; source .env; set +a`.
 
+> Metabase dan Trino masing-masing butuh sekitar 1–2 GB RAM. Di laptop dengan RAM 8 GB, jalankan salah satunya saja (`docker compose stop metabase` atau `docker compose stop trino`).
+
 ### Port
 
 | Service | Port di laptop |
@@ -142,6 +207,8 @@ Untuk Linux/macOS, ganti langkah 4 dengan `set -a; source .env; set +a`.
 | MySQL channel | 3307 |
 | MongoDB | 27017 |
 | REST API | 8080 |
+| Metabase | 3000 |
+| Trino | 8085 |
 
 Port database sengaja tidak memakai nilai default agar tidak bentrok dengan database lokal. Kalau kamu mengubah port, ubah di `docker-compose.yml` **dan** `.env`.
 
@@ -164,19 +231,19 @@ Hasil pengujian:
 
 Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window function `RANK` dan `LAG`) ada di [`docs/verification_queries.sql`](docs/verification_queries.sql).
 
-
 ![Riwayat SCD2](docs/images/scd2_history.png)
 ![Audit log](docs/images/audit_log.png)
-
 
 ## Struktur repository
 
 ```
 .
 ├── docker-compose.yml
+├── docker-compose.bi.yml       # Metabase
+├── docker-compose.trino.yml    # Trino
 ├── .env.example
-├── data_generator/        # generator data sintetis
-├── etl/                   # pipeline ETL
+├── data_generator/             # generator data sintetis
+├── etl/                        # pipeline ETL
 │   ├── extract.py
 │   ├── transform_load.py
 │   ├── data_quality.py
@@ -184,20 +251,25 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 │   ├── run_pipeline.py
 │   ├── simulate_changes.py
 │   └── sql/staging.sql
-├── api/                   # REST API (Spring Boot)
+├── api/                        # REST API (Spring Boot)
 │   └── src/main/java/dev/minibank/api/
 │       ├── controller/
 │       ├── repository/
 │       ├── model/
 │       └── error/
-├── sql/                   # skema database
-│   ├── source_postgres/   #   (dijalankan otomatis saat container pertama kali dibuat)
+├── trino/                      # konfigurasi data virtualization
+│   ├── catalog/                #   koneksi ke tiap sumber
+│   ├── queries/                #   contoh query lintas sumber
+│   └── access-control.properties
+├── sql/                        # skema database
+│   ├── source_postgres/        #   (dijalankan otomatis saat container pertama kali dibuat)
 │   ├── source_mysql/
 │   ├── dwh/
-│   └── ops/               #   skrip manual, mis. pembuatan user read-only API
+│   └── ops/                    #   skrip manual: user read-only API, semantic layer
 └── docs/
     ├── INGESTION_STANDARD.md
-    └── verification_queries.sql
+    ├── verification_queries.sql
+    └── images/
 ```
 
 ## Keputusan desain
@@ -209,20 +281,26 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 - **Python murni sebelum Airflow**: logika ETL dibuat dan dipahami dulu, baru dibungkus orkestrator.
 - **API memakai user database read-only** (least privilege): kalau API bermasalah, data DWH tetap tidak bisa diubah. Pool koneksi juga diset read-only, dan API tidak punya akses ke schema `staging` maupun `audit`.
 - **`JdbcTemplate` dipilih, bukan JPA**, karena query berupa join star schema yang bersifat analitik dan hanya-baca, sehingga SQL langsung lebih jelas dan mudah dioptimasi.
+- **Semantic layer berupa view**: metrik didefinisikan sekali dan dipakai semua laporan; BI tool hanya melihat view, bukan tabel mentah.
+- **ETL dan data virtualization dipakai bersama**: ETL untuk data yang sering dianalisis (performa stabil, tanpa membebani sumber), Trino untuk analisis cepat lintas sistem tanpa menyalin data.
 
 ## Keterbatasan yang diketahui
 
 - Watermark berbasis `id_transaksi` tidak menangkap perubahan pada transaksi lama atau data yang datang terlambat.
 - Kolom `loaded` pada dimensi SCD Type 1 menghitung baris yang di-upsert, bukan yang benar-benar berubah.
 - Orkestrasi ETL masih manual (belum ada penjadwalan otomatis).
-- MySQL dan MongoDB belum dimuat ke DWH.
+- MySQL dan MongoDB belum dimuat ke DWH (hanya bisa dibaca lewat Trino).
 - API belum punya autentikasi/otorisasi, unit test, caching, dan dokumentasi OpenAPI/Swagger.
+- Dashboard dibuat manual di Metabase dan belum disimpan sebagai kode; Metabase memakai database internal H2 (cukup untuk demo, bukan produksi).
+- Trino dikunci read-only di level sistem, tetapi catalog `core`, `mysql`, dan `mongodb` masih memakai akun pemilik database. Untuk produksi, gunakan user read-only per sumber.
+- Query Trino membebani sistem sumber dan tidak cocok untuk query berat yang berulang.
+- Metabase dan Trino cukup berat di laptop dengan RAM terbatas.
 - Data sintetis dibuat acak, sehingga distribusinya tidak mencerminkan pola nyata.
 
 ## Keamanan
 
 - Hanya data sintetis, tidak ada data pribadi asli.
 - NIK disimpan dalam bentuk masking.
-- Kredensial dibaca dari `.env` dan tidak masuk Git (`.env` ada di `.gitignore`).
+- Kredensial dibaca dari `.env` dan tidak masuk Git (`.env` ada di `.gitignore`); konfigurasi Trino membaca password lewat `${ENV:...}`.
 - Koneksi ETL ke sumber bersifat read-only.
-- API memakai user `api_reader` dengan hak `SELECT` saja; semua nilai query lewat placeholder (bukan digabung ke string SQL), dan pesan error tidak membocorkan detail internal.
+- API memakai user `api_reader` dan BI tool memakai user `bi_reader`, masing-masing dengan hak `SELECT` yang dibatasi; semua nilai query API lewat placeholder (bukan digabung ke string SQL), dan pesan error tidak membocorkan detail internal.
