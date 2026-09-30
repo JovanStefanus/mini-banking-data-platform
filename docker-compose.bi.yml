@@ -1,0 +1,14 @@
+# Layer BI: Metabase. Dimuat lewat "include" di docker-compose.yml.
+services:
+  metabase:
+    image: metabase/metabase:latest
+    container_name: mbdp_metabase
+    ports: ["3000:3000"]
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db   # database internal Metabase (H2, cukup untuk demo)
+      JAVA_OPTS: "-Xmx1g"                      # batasi memori agar laptop tidak berat
+    volumes:
+      - metabase_data:/metabase-data
+
+volumes:
+  metabase_data:
