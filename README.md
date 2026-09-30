@@ -1,6 +1,6 @@
 # Mini Banking Data Platform
 
-Simulasi platform data ala perbankan: data dari beberapa sumber diproses lewat pipeline ETL ke **data warehouse (star schema)**, lengkap dengan **SCD Type 2**, **incremental load**, **audit log**, dan **data quality check**.
+Simulasi platform data ala perbankan: data dari beberapa sumber diproses lewat pipeline ETL ke **data warehouse (star schema)**, lengkap dengan **SCD Type 2**, **incremental load**, **audit log**, dan **data quality check**. Data warehouse dilayani lewat **REST API read-only** berbasis Java Spring Boot.
 
 > **Semua data adalah data sintetis** (dibuat dengan Faker). Tidak ada data nasabah asli, dan NIK sudah dimasking.
 
@@ -10,23 +10,23 @@ Project portofolio untuk peran Data Engineer / Developer.
 
 - [x] **Fase 1** – Source database (PostgreSQL, MySQL, MongoDB), skema DWH, generator data sintetis
 - [x] **Fase 2** – Pipeline ETL ke DWH (SCD2, incremental load, audit log, data quality)
-- [ ] **Fase 3** – REST API Java Spring Boot (data transaksi dan master data nasabah)
+- [x] **Fase 3** – REST API Java Spring Boot (transaksi, master data nasabah, ringkasan harian)
 - [ ] **Fase 4** – Data virtualization (Trino), semantic layer, dashboard
 - [ ] **Fase 5** – Oracle/SQL Server sebagai sumber tambahan, Kubernetes, CI/CD, orkestrasi Airflow
 
 ## Arsitektur
 
 ```
- Source systems                 ETL (Python)                Data Warehouse (PostgreSQL)
-┌────────────────────┐        ┌───────────────────┐        ┌───────────────────────────┐
-│ PostgreSQL         │        │ Extract           │        │ staging  (data mentah)    │
-│ core banking       │───────►│  → staging        │───────►│ dwh      (star schema)    │
-├────────────────────┤        │ Transform & Load  │        │ audit    (monitoring ETL) │
-│ MySQL   (channel)  │  ....  │  → dimensi + fact │        └───────────────────────────┘
-│ MongoDB (log)      │        │ Data quality      │
-└────────────────────┘        │ Audit log         │
-   (MySQL & MongoDB           └───────────────────┘
-    belum dimuat ke DWH)
+ Source systems               ETL (Python)               Data Warehouse (PostgreSQL)        Serving
+┌──────────────────┐        ┌──────────────────┐        ┌──────────────────────────┐     ┌──────────────────┐
+│ PostgreSQL       │        │ Extract          │        │ staging (data mentah)    │     │ REST API         │
+│ core banking     │───────►│  → staging       │───────►│ dwh     (star schema)    │────►│ Java Spring Boot │
+├──────────────────┤        │ Transform & Load │        │ audit   (monitoring ETL) │     │ (read-only user) │
+│ MySQL   (channel)│  ....  │  → dimensi+fact  │        └──────────────────────────┘     └──────────────────┘
+│ MongoDB (log)    │        │ Data quality     │
+└──────────────────┘        │ Audit log        │
+ (MySQL & MongoDB           └──────────────────┘
+  belum dimuat ke DWH)
 ```
 
 Saat ini pipeline ETL memuat data dari **PostgreSQL core banking**. MySQL dan MongoDB sudah terisi data sintetis dan akan diintegrasikan pada fase berikutnya.
@@ -37,6 +37,7 @@ Saat ini pipeline ETL memuat data dari **PostgreSQL core banking**. MySQL dan Mo
 |---|---|
 | Database | PostgreSQL 16, MySQL 8.4, MongoDB 7 |
 | ETL | Python (psycopg2), SQL |
+| REST API | Java 17, Spring Boot 4.1, JdbcTemplate, Maven |
 | Infrastruktur | Docker, Docker Compose |
 | Data sintetis | Faker |
 | Version control | Git, GitHub |
@@ -68,7 +69,37 @@ Tabel monitoring ada di schema `audit`: `etl_audit_log` dan `dq_check_result`.
 
 Konvensi lengkap ada di [`docs/INGESTION_STANDARD.md`](docs/INGESTION_STANDARD.md).
 
-## Cara menjalankan
+## REST API
+
+API membaca data dari DWH memakai user database `api_reader` yang hanya punya hak `SELECT` di schema `dwh`.
+
+| Endpoint | Fungsi |
+|---|---|
+| `GET /api/v1/transaksi?tanggal=&channel=&page=&size=` | Transaksi per tanggal, dengan paginasi (maks 200 per halaman) |
+| `GET /api/v1/nasabah/{id}` | Master data nasabah (versi current) |
+| `GET /api/v1/nasabah/{id}/riwayat` | Riwayat versi nasabah (SCD Type 2) |
+| `GET /api/v1/ringkasan/harian?dari=&sampai=` | Jumlah dan total nominal transaksi per hari |
+| `GET /actuator/health` | Status aplikasi |
+
+Format tanggal `YYYY-MM-DD`. Nilai `channel`: `ATM`, `MOBILE`, `INTERNET`, `TELLER`. Input tidak valid menghasilkan `400` dengan pesan jelas, dan id yang tidak ada menghasilkan `404`.
+
+### Menjalankan API
+
+Prasyarat: JDK 17, dan database sudah berjalan dengan data hasil ETL.
+
+```powershell
+# 1. Tambahkan API_DB_PASSWORD di .env, lalu buat user read-only (sekali saja)
+Get-Content sql\ops\create_api_reader.sql | docker exec -i mbdp_pg_dwh psql -U dwh_user -d dwh -v api_pw=PASSWORD_API
+
+# 2. Muat .env ke terminal, lalu jalankan API
+Get-Content .\.env | ForEach-Object { if ($_ -match '^\s*([^#=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim(), 'Process') } }
+cd api
+.\mvnw.cmd spring-boot:run
+```
+
+Contoh: buka `http://localhost:8080/api/v1/ringkasan/harian` untuk melihat tanggal yang punya data, lalu `http://localhost:8080/api/v1/transaksi?tanggal=YYYY-MM-DD&size=5`.
+
+## Cara menjalankan ETL
 
 ### Prasyarat
 - Docker Desktop (mesin berstatus *running*)
@@ -110,10 +141,11 @@ Untuk Linux/macOS, ganti langkah 4 dengan `set -a; source .env; set +a`.
 | PostgreSQL DWH | 5433 |
 | MySQL channel | 3307 |
 | MongoDB | 27017 |
+| REST API | 8080 |
 
-Port sengaja tidak memakai nilai default agar tidak bentrok dengan database lokal. Kalau kamu mengubah port, ubah di `docker-compose.yml` **dan** `.env`.
+Port database sengaja tidak memakai nilai default agar tidak bentrok dengan database lokal. Kalau kamu mengubah port, ubah di `docker-compose.yml` **dan** `.env`.
 
-## Pengujian
+## Pengujian ETL
 
 ```powershell
 python -m etl.run_pipeline        # load awal
@@ -132,8 +164,10 @@ Hasil pengujian:
 
 Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window function `RANK` dan `LAG`) ada di [`docs/verification_queries.sql`](docs/verification_queries.sql).
 
+
 ![Riwayat SCD2](docs/images/scd2_history.png)
 ![Audit log](docs/images/audit_log.png)
+
 
 ## Struktur repository
 
@@ -150,10 +184,17 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 │   ├── run_pipeline.py
 │   ├── simulate_changes.py
 │   └── sql/staging.sql
-├── sql/                   # skema database (dijalankan otomatis saat container pertama kali dibuat)
-│   ├── source_postgres/
+├── api/                   # REST API (Spring Boot)
+│   └── src/main/java/dev/minibank/api/
+│       ├── controller/
+│       ├── repository/
+│       ├── model/
+│       └── error/
+├── sql/                   # skema database
+│   ├── source_postgres/   #   (dijalankan otomatis saat container pertama kali dibuat)
 │   ├── source_mysql/
-│   └── dwh/
+│   ├── dwh/
+│   └── ops/               #   skrip manual, mis. pembuatan user read-only API
 └── docs/
     ├── INGESTION_STANDARD.md
     └── verification_queries.sql
@@ -166,13 +207,16 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 - **Staging schema** memisahkan proses extract dari transformasi, sehingga transformasi bisa dijalankan ulang tanpa membaca sumber lagi.
 - **Audit log memakai koneksi terpisah** (autocommit) supaya catatan `FAILED` tetap tersimpan walaupun transaksi ETL di-rollback.
 - **Python murni sebelum Airflow**: logika ETL dibuat dan dipahami dulu, baru dibungkus orkestrator.
+- **API memakai user database read-only** (least privilege): kalau API bermasalah, data DWH tetap tidak bisa diubah. Pool koneksi juga diset read-only, dan API tidak punya akses ke schema `staging` maupun `audit`.
+- **`JdbcTemplate` dipilih, bukan JPA**, karena query berupa join star schema yang bersifat analitik dan hanya-baca, sehingga SQL langsung lebih jelas dan mudah dioptimasi.
 
 ## Keterbatasan yang diketahui
 
 - Watermark berbasis `id_transaksi` tidak menangkap perubahan pada transaksi lama atau data yang datang terlambat.
 - Kolom `loaded` pada dimensi SCD Type 1 menghitung baris yang di-upsert, bukan yang benar-benar berubah.
-- Orkestrasi masih manual (belum ada penjadwalan otomatis).
+- Orkestrasi ETL masih manual (belum ada penjadwalan otomatis).
 - MySQL dan MongoDB belum dimuat ke DWH.
+- API belum punya autentikasi/otorisasi, unit test, caching, dan dokumentasi OpenAPI/Swagger.
 - Data sintetis dibuat acak, sehingga distribusinya tidak mencerminkan pola nyata.
 
 ## Keamanan
@@ -181,3 +225,4 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 - NIK disimpan dalam bentuk masking.
 - Kredensial dibaca dari `.env` dan tidak masuk Git (`.env` ada di `.gitignore`).
 - Koneksi ETL ke sumber bersifat read-only.
+- API memakai user `api_reader` dengan hak `SELECT` saja; semua nilai query lewat placeholder (bukan digabung ke string SQL), dan pesan error tidak membocorkan detail internal.

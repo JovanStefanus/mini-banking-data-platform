@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: banking-api
+  datasource:
+    url: jdbc:postgresql://${PG_DWH_HOST:127.0.0.1}:${PG_DWH_PORT:5433}/dwh
+    username: ${API_DB_USER:api_reader}
+    password: ${API_DB_PASSWORD:}
+    hikari:
+      read-only: true
+      maximum-pool-size: 5
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
