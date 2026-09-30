@@ -12,7 +12,7 @@ Project portofolio untuk peran Data Engineer / Developer.
 - [x] **Fase 2** – Pipeline ETL ke DWH (SCD2, incremental load, audit log, data quality)
 - [x] **Fase 3** – REST API Java Spring Boot (transaksi, master data nasabah, ringkasan harian)
 - [x] **Fase 4a** – Semantic layer (view bisnis) dan dashboard Metabase
-- [ ] **Fase 4b** – Data virtualization dengan Trino (query lintas PostgreSQL, MySQL, MongoDB)
+- [x] **Fase 4b** – Data virtualization dengan Trino (query lintas PostgreSQL, MySQL, MongoDB)
 - [ ] **Fase 5** – Muat MySQL/MongoDB ke DWH dan API master data, orkestrasi Airflow, unit test/Swagger/CI, Oracle/SQL Server, Kubernetes
 
 ## Arsitektur
@@ -129,10 +129,8 @@ Get-Content trino\queries\04_tiga_sumber.sql | docker exec -i mbdp_trino trino -
 
 Antarmuka web Trino ada di `http://localhost:8085` (username bebas, tanpa password).
 
-<!-- Hapus tanda komentar ini setelah screenshot ditambahkan di docs/images:
 ![Query lintas sumber](docs/images/trino_federated.png)
 ![Antarmuka Trino](docs/images/trino_ui.png)
--->
 
 ## REST API
 

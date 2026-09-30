@@ -1,0 +1,15 @@
+# Layer data virtualization: Trino. Dimuat lewat "include" di docker-compose.yml.
+services:
+  trino:
+    image: trinodb/trino:latest
+    container_name: mbdp_trino
+    ports: ["8085:8080"]          # 8085 supaya tidak bentrok dengan REST API (8080)
+    mem_limit: 2g                 # batasi memori agar laptop tidak berat
+    environment:                  # dibaca catalog lewat ${ENV:NAMA}, password tidak ditulis di file
+      PG_CORE_PASSWORD: ${PG_CORE_PASSWORD}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MONGO_PASSWORD: ${MONGO_PASSWORD}
+      BI_DB_PASSWORD: ${BI_DB_PASSWORD}
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/access-control.properties:/etc/trino/access-control.properties:ro
