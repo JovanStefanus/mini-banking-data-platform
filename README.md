@@ -1,5 +1,7 @@
 # Mini Banking Data Platform
 
+[![CI](https://github.com/JovanStefanus/mini-banking-data-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/JovanStefanus/mini-banking-data-platform/actions/workflows/ci.yml)
+
 Simulasi platform data ala perbankan: data dari beberapa sumber diproses lewat pipeline ETL ke **data warehouse (star schema)**, lengkap dengan **SCD Type 2**, **incremental load**, **audit log**, dan **data quality check**. Data warehouse dilayani lewat **REST API** (Java Spring Boot), **semantic layer + dashboard** (Metabase), dan **data virtualization** (Trino).
 
 > **Semua data adalah data sintetis** (dibuat dengan Faker). Tidak ada data nasabah asli, dan NIK sudah dimasking.
@@ -15,7 +17,7 @@ Project portofolio untuk peran Data Engineer / Developer.
 - [x] **Fase 4b** – Data virtualization dengan Trino (query lintas PostgreSQL, MySQL, MongoDB)
 - [x] **Fase 5a** – MySQL dan MongoDB dimuat ke DWH, golden record nasabah, endpoint profil 360
 - [ ] **Fase 5b** – Orkestrasi dengan Airflow (penjadwalan dan monitoring pipeline)
-- [ ] **Fase 5c** – Unit test, dokumentasi Swagger/OpenAPI, GitHub Actions (CI)
+- [x] **Fase 5c** – Unit test, dokumentasi OpenAPI/Swagger, GitHub Actions (CI)
 - [ ] **Fase 6** – Oracle/SQL Server sebagai sumber tambahan, Kubernetes (opsional)
 
 ## Arsitektur
@@ -46,6 +48,8 @@ Pipeline ETL memuat data dari **tiga sumber**: PostgreSQL core banking, MySQL (m
 | Data virtualization | Trino |
 | Infrastruktur | Docker, Docker Compose |
 | Data sintetis | Faker |
+| Pengujian | JUnit 5 dan Mockito (Java), pytest (Python) |
+| CI | GitHub Actions |
 | Version control | Git, GitHub |
 
 ## Model data
@@ -165,7 +169,7 @@ Antarmuka web Trino ada di `http://localhost:8085` (username bebas, tanpa passwo
 
 ## REST API
 
-API membaca data dari DWH memakai user database `api_reader` yang hanya punya hak `SELECT` di schema `dwh`.
+API membaca data dari DWH memakai user database `api_reader` yang hanya punya hak `SELECT` di schema `dwh` dan satu view di schema `semantic` (`v_nasabah_360`).
 
 | Endpoint | Fungsi |
 |---|---|
@@ -177,6 +181,10 @@ API membaca data dari DWH memakai user database `api_reader` yang hanya punya ha
 | `GET /actuator/health` | Status aplikasi |
 
 Format tanggal `YYYY-MM-DD`. Nilai `channel`: `ATM`, `MOBILE`, `INTERNET`, `TELLER`. Input tidak valid menghasilkan `400` dengan pesan jelas, dan id yang tidak ada menghasilkan `404`.
+
+Dokumentasi interaktif (OpenAPI) tersedia di `http://localhost:8080/swagger.html` saat API berjalan. Tampilan Swagger UI dimuat dari CDN, jadi butuh koneksi internet.
+
+![Swagger UI](docs/images/swagger_ui.png)
 
 ### Menjalankan API
 
@@ -270,6 +278,21 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 ![Riwayat SCD2](docs/images/scd2_history.png)
 ![Audit log](docs/images/audit_log.png)
 
+## Unit test dan CI
+
+| Area | Cakupan | Perintah |
+|---|---|---|
+| API (Java, JUnit 5 + Mockito) | Validasi controller (batas `size`/`page`, channel, rentang tanggal), penanganan error 400/404/500 tanpa membocorkan detail internal, dan pengecekan bahwa dokumentasi OpenAPI memuat semua endpoint | `cd api` lalu `.\mvnw.cmd test` |
+| ETL dan generator (Python, pytest) | Extract MongoDB (IP tidak dimuat, dokumen tidak lengkap ditolak, watermark), generator data selalu sejalan dengan `CHECK` constraint di skema SQL, dan konfigurasi | `python -m pytest -q` |
+
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) menjalankan tiga pekerjaan pada setiap push ke `main` dan setiap pull request:
+
+1. **API**: build dan unit test dengan Java 17 dan Maven.
+2. **ETL**: cek sintaks dan unit test Python.
+3. **Docker Compose**: validasi konfigurasi `docker-compose.yml` beserta file yang di-`include`.
+
+Unit test sengaja tidak memakai database: repository dan koneksi diganti objek tiruan, sehingga tes cepat dan tidak butuh Docker.
+
 ## Struktur repository
 
 ```
@@ -278,6 +301,10 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 ├── docker-compose.bi.yml       # Metabase
 ├── docker-compose.trino.yml    # Trino
 ├── .env.example
+├── .github/workflows/ci.yml    # GitHub Actions (CI)
+├── pytest.ini
+├── requirements-dev.txt
+├── tests/                      # unit test Python
 ├── data_generator/             # generator data sintetis
 ├── etl/                        # pipeline ETL
 │   ├── extract.py              # sumber PostgreSQL
@@ -292,11 +319,13 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 │   ├── simulate_channel.py
 │   └── sql/staging.sql
 ├── api/                        # REST API (Spring Boot)
-│   └── src/main/java/dev/minibank/api/
-│       ├── controller/
-│       ├── repository/
-│       ├── model/
-│       └── error/
+│   ├── src/main/java/dev/minibank/api/
+│   │   ├── controller/
+│   │   ├── repository/
+│   │   ├── model/
+│   │   └── error/
+│   ├── src/main/resources/static/   # openapi.yaml dan swagger.html
+│   └── src/test/java/               # unit test
 ├── trino/                      # konfigurasi data virtualization
 │   ├── catalog/                #   koneksi ke tiap sumber
 │   ├── queries/                #   contoh query lintas sumber
@@ -325,6 +354,8 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 - **ETL dan data virtualization dipakai bersama**: ETL untuk data yang sering dianalisis (performa stabil, tanpa membebani sumber), Trino untuk analisis cepat lintas sistem tanpa menyalin data.
 - **Golden record berupa view di semantic layer**: satu definisi profil nasabah dipakai API dan BI, dan selalu mengikuti data terbaru di DWH.
 - **Fakta channel memakai `id_nasabah` (business key)**, bukan surrogate key versi nasabah, karena sumbernya tidak mencatat versi nasabah.
+- **Unit test tanpa database dan CI otomatis**: setiap perubahan diuji dan divalidasi di GitHub Actions sebelum masuk `main`, sehingga perubahan yang merusak ketahuan lebih awal.
+- **Dokumentasi OpenAPI ditulis manual**, dengan satu unit test yang menjaganya agar tidak ketinggalan dari endpoint. Library otomatis (springdoc) belum dipakai karena kompatibilitasnya dengan Spring Boot 4.1 belum terkonfirmasi.
 
 ## Keterbatasan yang diketahui
 
@@ -334,7 +365,8 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 - Fakta channel (`fact_sesi_login`, `fact_aktivitas`) belum terhubung ke versi historis nasabah, sehingga analisis per segmen pada saat kejadian hanya tersedia untuk transaksi.
 - Watermark MongoDB memakai `_id`, sehingga dokumen lama yang diubah tidak ikut diperbarui.
 - Golden record menganggap satu nasabah punya paling banyak satu akun mobile banking.
-- API belum punya autentikasi/otorisasi, unit test, caching, dan dokumentasi OpenAPI/Swagger.
+- API belum punya autentikasi/otorisasi dan caching. Dokumentasi OpenAPI ditulis manual (dijaga oleh satu unit test), bukan dihasilkan otomatis.
+- Unit test memakai objek tiruan; belum ada integration test yang menjalankan pipeline dan API terhadap database sungguhan di CI.
 - Dashboard dibuat manual di Metabase dan belum disimpan sebagai kode; Metabase memakai database internal H2 (cukup untuk demo, bukan produksi).
 - Trino dikunci read-only di level sistem, tetapi catalog `core`, `mysql`, dan `mongodb` masih memakai akun pemilik database. Untuk produksi, gunakan user read-only per sumber.
 - Query Trino membebani sistem sumber dan tidak cocok untuk query berat yang berulang.
