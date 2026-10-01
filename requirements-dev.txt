@@ -1,0 +1,2 @@
+-r data_generator/requirements.txt
+pytest

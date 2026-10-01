@@ -1,0 +1,229 @@
+openapi: 3.0.3
+info:
+  title: Mini Banking Data Platform API
+  description: API read-only untuk data warehouse. Semua data adalah data sintetis.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /api/v1/transaksi:
+    get:
+      summary: Daftar transaksi pada satu tanggal (berpaginasi)
+      parameters:
+        - name: tanggal
+          in: query
+          required: true
+          description: Format YYYY-MM-DD
+          schema:
+            type: string
+            format: date
+          example: "2026-09-01"
+        - name: channel
+          in: query
+          schema:
+            type: string
+            enum: [ATM, MOBILE, INTERNET, TELLER]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: Halaman transaksi
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageTransaksi"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /api/v1/nasabah/{id}:
+    get:
+      summary: Master data nasabah (versi current)
+      parameters:
+        - $ref: "#/components/parameters/IdNasabah"
+      responses:
+        "200":
+          description: Data nasabah
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Nasabah"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/nasabah/{id}/riwayat:
+    get:
+      summary: Riwayat versi nasabah (SCD Type 2)
+      parameters:
+        - $ref: "#/components/parameters/IdNasabah"
+      responses:
+        "200":
+          description: Daftar versi, dari yang terlama
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NasabahVersi"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/nasabah/{id}/profil:
+    get:
+      summary: Profil 360 nasabah (golden record dari core banking, mobile banking, dan log aktivitas)
+      parameters:
+        - $ref: "#/components/parameters/IdNasabah"
+      responses:
+        "200":
+          description: Profil nasabah
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfilNasabah"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/ringkasan/harian:
+    get:
+      summary: Jumlah dan total nominal transaksi per hari
+      description: Tanpa parameter, yang ditampilkan adalah 30 hari terakhir sampai hari ini. Rentang maksimal 366 hari.
+      parameters:
+        - name: dari
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: sampai
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Ringkasan per hari
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RingkasanHarian"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /actuator/health:
+    get:
+      summary: Status aplikasi
+      responses:
+        "200":
+          description: Aplikasi berjalan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: UP
+components:
+  parameters:
+    IdNasabah:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+  responses:
+    BadRequest:
+      description: Parameter tidak valid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Data tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    Transaksi:
+      type: object
+      properties:
+        idTransaksi: {type: integer, format: int64}
+        waktuTransaksi: {type: string, format: date-time}
+        idNasabah: {type: integer}
+        namaNasabah: {type: string}
+        segmen: {type: string}
+        produk: {type: string}
+        cabang: {type: string}
+        channel: {type: string}
+        jenisTransaksi: {type: string}
+        nominal: {type: number}
+    PageTransaksi:
+      type: object
+      properties:
+        page: {type: integer}
+        size: {type: integer}
+        totalElements: {type: integer, format: int64}
+        totalPages: {type: integer}
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Transaksi"
+    Nasabah:
+      type: object
+      properties:
+        idNasabah: {type: integer}
+        nama: {type: string}
+        kota: {type: string}
+        segmen: {type: string}
+        tglDaftar: {type: string, format: date}
+    NasabahVersi:
+      type: object
+      properties:
+        nama: {type: string}
+        kota: {type: string}
+        segmen: {type: string}
+        berlakuDari: {type: string, format: date-time}
+        berlakuSampai:
+          type: string
+          format: date-time
+          nullable: true
+          description: Kosong (null) berarti versi yang masih berlaku
+        current: {type: boolean}
+    ProfilNasabah:
+      type: object
+      properties:
+        idNasabah: {type: integer}
+        nama: {type: string}
+        kota: {type: string}
+        segmen: {type: string}
+        tglDaftar: {type: string, format: date}
+        punyaMobileBanking: {type: boolean}
+        deviceType: {type: string, nullable: true}
+        tglAktivasiMobile: {type: string, format: date, nullable: true}
+        jumlahTransaksi: {type: integer, format: int64}
+        totalNominal: {type: number}
+        jumlahLogin: {type: integer, format: int64}
+        loginTerakhir: {type: string, format: date-time, nullable: true}
+        jumlahAktivitas: {type: integer, format: int64}
+        aktivitasGagal: {type: integer, format: int64}
+        aktivitasTerakhir: {type: string, format: date-time, nullable: true}
+    RingkasanHarian:
+      type: object
+      properties:
+        tanggal: {type: string, format: date}
+        jumlahTransaksi: {type: integer, format: int64}
+        totalNominal: {type: number}
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp: {type: string, format: date-time}
+        status: {type: integer}
+        error: {type: string}
+        message: {type: string}
