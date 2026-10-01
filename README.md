@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/JovanStefanus/mini-banking-data-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/JovanStefanus/mini-banking-data-platform/actions/workflows/ci.yml)
 
-Simulasi platform data ala perbankan: data dari beberapa sumber diproses lewat pipeline ETL ke **data warehouse (star schema)**, lengkap dengan **SCD Type 2**, **incremental load**, **audit log**, dan **data quality check**. Data warehouse dilayani lewat **REST API** (Java Spring Boot), **semantic layer + dashboard** (Metabase), dan **data virtualization** (Trino).
+Simulasi platform data ala perbankan: data dari beberapa sumber diproses lewat pipeline ETL ke **data warehouse (star schema)**, lengkap dengan **SCD Type 2**, **incremental load**, **audit log**, dan **data quality check**. Data warehouse dilayani lewat **REST API** (Java Spring Boot), **semantic layer + dashboard** (Metabase), dan **data virtualization** (Trino), dengan orkestrasi **Airflow**.
 
 > **Semua data adalah data sintetis** (dibuat dengan Faker). Tidak ada data nasabah asli, dan NIK sudah dimasking.
 
@@ -16,7 +16,7 @@ Project portofolio untuk peran Data Engineer / Developer.
 - [x] **Fase 4a** – Semantic layer (view bisnis) dan dashboard Metabase
 - [x] **Fase 4b** – Data virtualization dengan Trino (query lintas PostgreSQL, MySQL, MongoDB)
 - [x] **Fase 5a** – MySQL dan MongoDB dimuat ke DWH, golden record nasabah, endpoint profil 360
-- [ ] **Fase 5b** – Orkestrasi dengan Airflow (penjadwalan dan monitoring pipeline)
+- [x] **Fase 5b** – Orkestrasi dengan Airflow (penjadwalan, retry, dan monitoring pipeline)
 - [x] **Fase 5c** – Unit test, dokumentasi OpenAPI/Swagger, GitHub Actions (CI)
 - [ ] **Fase 6** – Oracle/SQL Server sebagai sumber tambahan, Kubernetes (opsional)
 
@@ -33,6 +33,8 @@ Project portofolio untuk peran Data Engineer / Developer.
 └───────▲────────┘       └──────────────┘
         │
         └── Trino (data virtualization): query lintas sumber tanpa memindahkan data
+
+ Airflow (orkestrasi): menjadwalkan, mengulang, dan memantau pipeline ETL
 ```
 
 Pipeline ETL memuat data dari **tiga sumber**: PostgreSQL core banking, MySQL (mobile banking), dan MongoDB (log aktivitas). Trino juga dapat membaca ketiganya langsung tanpa memindahkan data.
@@ -46,6 +48,7 @@ Pipeline ETL memuat data dari **tiga sumber**: PostgreSQL core banking, MySQL (m
 | REST API | Java 17, Spring Boot 4.1, JdbcTemplate, Maven |
 | BI / dashboard | Metabase |
 | Data virtualization | Trino |
+| Orkestrasi | Apache Airflow 3 |
 | Infrastruktur | Docker, Docker Compose |
 | Data sintetis | Faker |
 | Pengujian | JUnit 5 dan Mockito (Java), pytest (Python) |
@@ -167,6 +170,33 @@ Antarmuka web Trino ada di `http://localhost:8085` (username bebas, tanpa passwo
 ![Query lintas sumber](docs/images/trino_federated.png)
 ![Antarmuka Trino](docs/images/trino_ui.png)
 
+## Orkestrasi (Airflow)
+
+DAG `core_to_dwh_daily` ([`airflow/dags/etl_harian.py`](airflow/dags/etl_harian.py)) menjalankan pipeline ETL setiap hari pukul 01:00 WIB. Kode ETL tidak diubah: Airflow menambahkan penjadwalan, retry otomatis, riwayat run, dan antarmuka monitoring.
+
+| Task | Fungsi |
+|---|---|
+| `cek_koneksi` | `python -m etl.healthcheck`: memastikan keempat database terjangkau sebelum pipeline berjalan |
+| `jalankan_pipeline_etl` | `python -m etl.run_pipeline`: pipeline ETL lengkap (batas waktu 30 menit) |
+| `ringkas_audit` | `python -m etl.audit_report`: ringkasan langkah, jumlah baris, dan durasi run terakhir dari audit log |
+
+Retry 3 kali dengan jeda 5 menit, hanya satu run aktif dalam satu waktu (`max_active_runs=1`), dan tanpa `catchup`. Aman diulang karena pipeline bersifat idempotent. Nama DAG sama dengan nama pipeline di `audit.etl_audit_log`.
+
+```powershell
+# Hemat RAM: hentikan Trino dan Metabase, lalu bangun dan jalankan Airflow
+docker compose stop trino metabase
+docker compose up -d --build airflow
+
+# Kata sandi pengguna admin dibuat otomatis dan tercatat di log
+docker compose logs airflow | Select-String -Pattern "assword"
+```
+
+Buka `http://localhost:8090`, masuk sebagai `admin`, nyalakan DAG `core_to_dwh_daily`, lalu klik **Trigger**.
+
+![DAG di Airflow](docs/images/airflow_dag.png)
+
+Kalau pipeline gagal, ikuti runbook [`docs/runbook/pipeline_gagal.md`](docs/runbook/pipeline_gagal.md): cara membaca log dan audit log, penyebab umum, dan cara menjalankan ulang.
+
 ## REST API
 
 API membaca data dari DWH memakai user database `api_reader` yang hanya punya hak `SELECT` di schema `dwh` dan satu view di schema `semantic` (`v_nasabah_360`).
@@ -236,7 +266,7 @@ python -m etl.run_pipeline
 
 Untuk Linux/macOS, ganti langkah 4 dengan `set -a; source .env; set +a`.
 
-> Metabase dan Trino masing-masing butuh sekitar 1–2 GB RAM. Di laptop dengan RAM 8 GB, jalankan salah satunya saja (`docker compose stop metabase` atau `docker compose stop trino`).
+> Metabase, Trino, dan Airflow masing-masing butuh sekitar 1–3 GB RAM. Di laptop dengan RAM 8 GB, jalankan salah satunya saja (`docker compose stop metabase`, `docker compose stop trino`, atau `docker compose stop airflow`).
 
 ### Port
 
@@ -249,6 +279,7 @@ Untuk Linux/macOS, ganti langkah 4 dengan `set -a; source .env; set +a`.
 | REST API | 8080 |
 | Metabase | 3000 |
 | Trino | 8085 |
+| Airflow | 8090 |
 
 Port database sengaja tidak memakai nilai default agar tidak bentrok dengan database lokal. Kalau kamu mengubah port, ubah di `docker-compose.yml` **dan** `.env`.
 
@@ -283,7 +314,7 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 | Area | Cakupan | Perintah |
 |---|---|---|
 | API (Java, JUnit 5 + Mockito) | Validasi controller (batas `size`/`page`, channel, rentang tanggal), penanganan error 400/404/500 tanpa membocorkan detail internal, dan pengecekan bahwa dokumentasi OpenAPI memuat semua endpoint | `cd api` lalu `.\mvnw.cmd test` |
-| ETL dan generator (Python, pytest) | Extract MongoDB (IP tidak dimuat, dokumen tidak lengkap ditolak, watermark), generator data selalu sejalan dengan `CHECK` constraint di skema SQL, dan konfigurasi | `python -m pytest -q` |
+| ETL dan generator (Python, pytest) | Extract MongoDB (IP tidak dimuat, dokumen tidak lengkap ditolak, watermark), generator data selalu sejalan dengan `CHECK` constraint di skema SQL, konfigurasi, DAG Airflow (jadwal, retry, urutan task), dan healthcheck koneksi | `python -m pytest -q` |
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) menjalankan tiga pekerjaan pada setiap push ke `main` dan setiap pull request:
 
@@ -300,10 +331,14 @@ Unit test sengaja tidak memakai database: repository dan koneksi diganti objek t
 ├── docker-compose.yml
 ├── docker-compose.bi.yml       # Metabase
 ├── docker-compose.trino.yml    # Trino
+├── docker-compose.airflow.yml  # Airflow
 ├── .env.example
 ├── .github/workflows/ci.yml    # GitHub Actions (CI)
 ├── pytest.ini
 ├── requirements-dev.txt
+├── airflow/                    # orkestrasi (DAG Airflow)
+│   ├── Dockerfile
+│   └── dags/etl_harian.py
 ├── tests/                      # unit test Python
 ├── data_generator/             # generator data sintetis
 ├── etl/                        # pipeline ETL
@@ -317,6 +352,8 @@ Unit test sengaja tidak memakai database: repository dan koneksi diganti objek t
 │   ├── run_pipeline.py
 │   ├── simulate_changes.py
 │   ├── simulate_channel.py
+│   ├── healthcheck.py
+│   ├── audit_report.py
 │   └── sql/staging.sql
 ├── api/                        # REST API (Spring Boot)
 │   ├── src/main/java/dev/minibank/api/
@@ -338,6 +375,7 @@ Unit test sengaja tidak memakai database: repository dan koneksi diganti objek t
 └── docs/
     ├── INGESTION_STANDARD.md
     ├── verification_queries.sql
+    ├── runbook/pipeline_gagal.md
     └── images/
 ```
 
@@ -347,7 +385,7 @@ Unit test sengaja tidak memakai database: repository dan koneksi diganti objek t
 - **SCD Type 2 untuk nasabah** agar analisis historis tetap akurat: transaksi lama tetap terhubung ke segmen nasabah saat itu, bukan segmen terbaru.
 - **Staging schema** memisahkan proses extract dari transformasi, sehingga transformasi bisa dijalankan ulang tanpa membaca sumber lagi.
 - **Audit log memakai koneksi terpisah** (autocommit) supaya catatan `FAILED` tetap tersimpan walaupun transaksi ETL di-rollback.
-- **Python murni sebelum Airflow**: logika ETL dibuat dan dipahami dulu, baru dibungkus orkestrator.
+- **Python murni dulu, baru Airflow**: logika ETL dibuat dan dipahami dulu, lalu dibungkus orkestrator. Airflow hanya memanggil `etl.run_pipeline`, sehingga kode ETL tidak berubah.
 - **API memakai user database read-only** (least privilege): kalau API bermasalah, data DWH tetap tidak bisa diubah. Pool koneksi juga diset read-only, dan API tidak punya akses ke schema `staging` maupun `audit`.
 - **`JdbcTemplate` dipilih, bukan JPA**, karena query berupa join star schema yang bersifat analitik dan hanya-baca, sehingga SQL langsung lebih jelas dan mudah dioptimasi.
 - **Semantic layer berupa view**: metrik didefinisikan sekali dan dipakai semua laporan; BI tool hanya melihat view, bukan tabel mentah.
@@ -356,12 +394,15 @@ Unit test sengaja tidak memakai database: repository dan koneksi diganti objek t
 - **Fakta channel memakai `id_nasabah` (business key)**, bukan surrogate key versi nasabah, karena sumbernya tidak mencatat versi nasabah.
 - **Unit test tanpa database dan CI otomatis**: setiap perubahan diuji dan divalidasi di GitHub Actions sebelum masuk `main`, sehingga perubahan yang merusak ketahuan lebih awal.
 - **Dokumentasi OpenAPI ditulis manual**, dengan satu unit test yang menjaganya agar tidak ketinggalan dari endpoint. Library otomatis (springdoc) belum dipakai karena kompatibilitasnya dengan Spring Boot 4.1 belum terkonfirmasi.
+- **Task `cek_koneksi` di awal DAG**: kalau database mati, kegagalan langsung terlihat dengan nama database yang bermasalah, bukan sebagai error panjang di tengah ETL.
+- **Retry aman karena pipeline idempotent**: `ON CONFLICT DO NOTHING` dan watermark membuat run ulang tidak menggandakan data.
+- **Runbook** menyertai pipeline: penanganan gangguan ditulis sebagai prosedur, bukan pengetahuan di kepala satu orang.
 
 ## Keterbatasan yang diketahui
 
 - Watermark berbasis `id_transaksi` tidak menangkap perubahan pada transaksi lama atau data yang datang terlambat.
 - Kolom `loaded` pada dimensi SCD Type 1 menghitung baris yang di-upsert, bukan yang benar-benar berubah.
-- Orkestrasi ETL masih manual (belum ada penjadwalan otomatis).
+- Airflow berjalan dalam mode standalone dengan database SQLite dan simple auth manager bawaan (cukup untuk demo, bukan produksi). Belum ada notifikasi ke email atau Slack; kegagalan hanya terlihat di antarmuka dan log.
 - Fakta channel (`fact_sesi_login`, `fact_aktivitas`) belum terhubung ke versi historis nasabah, sehingga analisis per segmen pada saat kejadian hanya tersedia untuk transaksi.
 - Watermark MongoDB memakai `_id`, sehingga dokumen lama yang diubah tidak ikut diperbarui.
 - Golden record menganggap satu nasabah punya paling banyak satu akun mobile banking.
@@ -370,7 +411,7 @@ Unit test sengaja tidak memakai database: repository dan koneksi diganti objek t
 - Dashboard dibuat manual di Metabase dan belum disimpan sebagai kode; Metabase memakai database internal H2 (cukup untuk demo, bukan produksi).
 - Trino dikunci read-only di level sistem, tetapi catalog `core`, `mysql`, dan `mongodb` masih memakai akun pemilik database. Untuk produksi, gunakan user read-only per sumber.
 - Query Trino membebani sistem sumber dan tidak cocok untuk query berat yang berulang.
-- Metabase dan Trino cukup berat di laptop dengan RAM terbatas.
+- Metabase, Trino, dan Airflow cukup berat di laptop dengan RAM terbatas.
 - Data sintetis dibuat acak, sehingga distribusinya tidak mencerminkan pola nyata.
 
 ## Keamanan
@@ -381,3 +422,4 @@ Unit test sengaja tidak memakai database: repository dan koneksi diganti objek t
 - Koneksi ETL ke PostgreSQL dan MySQL bersifat read-only.
 - Alamat IP dari log aktivitas tidak dimuat ke DWH (data minimization).
 - API memakai user `api_reader` dan BI tool memakai user `bi_reader`, masing-masing dengan hak `SELECT` yang dibatasi; semua nilai query API lewat placeholder (bukan digabung ke string SQL), dan pesan error tidak membocorkan detail internal.
+- Antarmuka Airflow hanya dibuka di `127.0.0.1` (tidak bisa diakses dari jaringan lain), dan password database sampai ke container lewat environment dari `.env`, bukan ditulis di kode.
