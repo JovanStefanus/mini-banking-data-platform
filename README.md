@@ -13,7 +13,10 @@ Project portofolio untuk peran Data Engineer / Developer.
 - [x] **Fase 3** – REST API Java Spring Boot (transaksi, master data nasabah, ringkasan harian)
 - [x] **Fase 4a** – Semantic layer (view bisnis) dan dashboard Metabase
 - [x] **Fase 4b** – Data virtualization dengan Trino (query lintas PostgreSQL, MySQL, MongoDB)
-- [ ] **Fase 5** – Muat MySQL/MongoDB ke DWH dan API master data, orkestrasi Airflow, unit test/Swagger/CI, Oracle/SQL Server, Kubernetes
+- [x] **Fase 5a** – MySQL dan MongoDB dimuat ke DWH, golden record nasabah, endpoint profil 360
+- [ ] **Fase 5b** – Orkestrasi dengan Airflow (penjadwalan dan monitoring pipeline)
+- [ ] **Fase 5c** – Unit test, dokumentasi Swagger/OpenAPI, GitHub Actions (CI)
+- [ ] **Fase 6** – Oracle/SQL Server sebagai sumber tambahan, Kubernetes (opsional)
 
 ## Arsitektur
 
@@ -30,14 +33,14 @@ Project portofolio untuk peran Data Engineer / Developer.
         └── Trino (data virtualization): query lintas sumber tanpa memindahkan data
 ```
 
-Saat ini pipeline ETL memuat data dari **PostgreSQL core banking**. MySQL dan MongoDB sudah terisi data sintetis dan dapat dibaca langsung lewat Trino; memuatnya ke DWH direncanakan pada Fase 5.
+Pipeline ETL memuat data dari **tiga sumber**: PostgreSQL core banking, MySQL (mobile banking), dan MongoDB (log aktivitas). Trino juga dapat membaca ketiganya langsung tanpa memindahkan data.
 
 ## Tech stack
 
 | Area | Teknologi |
 |---|---|
 | Database | PostgreSQL 16, MySQL 8.4, MongoDB 7 |
-| ETL | Python (psycopg2), SQL |
+| ETL | Python (psycopg2, mysql-connector, pymongo), SQL |
 | REST API | Java 17, Spring Boot 4.1, JdbcTemplate, Maven |
 | BI / dashboard | Metabase |
 | Data virtualization | Trino |
@@ -57,6 +60,9 @@ Star schema dengan `fact_transaksi` di tengah:
 | `dim_produk` | Dimensi | SCD Type 1 |
 | `dim_cabang` | Dimensi | SCD Type 1 |
 | `dim_channel` | Dimensi | ATM, MOBILE, INTERNET, TELLER |
+| `dim_mobile_user` | Dimensi | Akun mobile banking (dari MySQL), SCD Type 1 |
+| `fact_sesi_login` | Fakta | Sesi login mobile banking (dari MySQL), kunci `id_sesi` |
+| `fact_aktivitas` | Fakta | Log aktivitas nasabah (dari MongoDB), kunci `id_log` (ObjectId) |
 
 Tabel monitoring ada di schema `audit`: `etl_audit_log` dan `dq_check_result`.
 
@@ -68,7 +74,11 @@ Tabel monitoring ada di schema `audit`: `etl_audit_log` dan `dq_check_result`.
 - **Point-in-time join**: transaksi dihubungkan ke versi nasabah yang berlaku saat transaksi terjadi.
 - **Audit log**: setiap langkah mencatat status, jumlah baris dibaca/dimuat/ditolak, dan durasi.
 - **Data quality check**: cek NULL, satu versi current per nasabah, nominal > 0, dan rekonsiliasi jumlah baris serta total nominal terhadap sumber.
-- **Koneksi sumber read-only**: ETL tidak bisa mengubah data core banking.
+- **Multi-source**: PostgreSQL (core banking), MySQL (mobile banking), dan MongoDB (log aktivitas) dimuat dalam satu pipeline.
+- **Watermark per sumber**: `id_transaksi` (PostgreSQL), `id_sesi` (MySQL), dan `_id` ObjectId (MongoDB).
+- **Validasi saat ingestion**: dokumen MongoDB yang tidak lengkap ditolak dan dihitung sebagai `rejected`.
+- **Data minimization**: alamat IP dari log aktivitas tidak dimuat ke DWH.
+- **Koneksi sumber read-only**: koneksi ke PostgreSQL dan MySQL dibuat read-only; ETL hanya membaca dari MongoDB.
 
 Konvensi lengkap ada di [`docs/INGESTION_STANDARD.md`](docs/INGESTION_STANDARD.md).
 
@@ -84,6 +94,7 @@ Schema `semantic` berisi view bisnis di atas star schema. Definisi metrik dituli
 | `v_channel_mix` | Komposisi transaksi per channel (dengan persentase) |
 | `v_produk_ranking` | Peringkat produk berdasarkan total nominal |
 | `v_segmen_nasabah` | Jumlah nasabah, transaksi, dan nominal per segmen |
+| `v_nasabah_360` | **Golden record**: profil nasabah dari core banking, mobile banking, dan log aktivitas |
 
 `segmen_nasabah` adalah segmen yang berlaku **saat transaksi terjadi** (hasil SCD Type 2).
 
@@ -102,6 +113,26 @@ docker compose up -d
 ```
 
 Saat menambahkan database di Metabase: Host `postgres_dwh`, Port `5432`, Database `dwh`, Username `bi_reader`, Schemas → *Only these...* → `semantic`.
+
+## Golden record (Master Data Management)
+
+View `semantic.v_nasabah_360` menghasilkan **satu baris per nasabah** yang menggabungkan tiga sistem yang masing-masing hanya tahu sebagian:
+
+| Sumber | Informasi |
+|---|---|
+| PostgreSQL (core banking) | Identitas, kota, segmen, jumlah dan total transaksi |
+| MySQL (mobile banking) | Status dan perangkat mobile banking, jumlah dan waktu login terakhir |
+| MongoDB (log aktivitas) | Jumlah aktivitas, aktivitas gagal, dan aktivitas terakhir |
+
+API menyajikannya di `GET /api/v1/nasabah/{id}/profil`. Endpoint ini membaca dari semantic layer, sehingga definisi metrik tidak diduplikasi di kode API.
+
+```powershell
+# Jalankan setelah pipeline ETL berhasil
+Get-Content sql\ops\create_nasabah_360.sql | docker exec -i mbdp_pg_dwh psql -U dwh_user -d dwh
+```
+
+![Profil nasabah 360 lewat API](docs/images/golden_record_api.png)
+![Pipeline dengan sumber channel](docs/images/pipeline_channel.png)
 
 ## Data virtualization (Trino)
 
@@ -141,6 +172,7 @@ API membaca data dari DWH memakai user database `api_reader` yang hanya punya ha
 | `GET /api/v1/transaksi?tanggal=&channel=&page=&size=` | Transaksi per tanggal, dengan paginasi (maks 200 per halaman) |
 | `GET /api/v1/nasabah/{id}` | Master data nasabah (versi current) |
 | `GET /api/v1/nasabah/{id}/riwayat` | Riwayat versi nasabah (SCD Type 2) |
+| `GET /api/v1/nasabah/{id}/profil` | Profil 360 nasabah (golden record dari tiga sumber) |
 | `GET /api/v1/ringkasan/harian?dari=&sampai=` | Jumlah dan total nominal transaksi per hari |
 | `GET /actuator/health` | Status aplikasi |
 
@@ -219,6 +251,8 @@ python -m etl.run_pipeline        # load awal
 python -m etl.run_pipeline        # run ulang: tidak ada baris baru (idempotent)
 python -m etl.simulate_changes    # ubah segmen nasabah + tambah transaksi di sumber
 python -m etl.run_pipeline        # SCD2 membuat versi baru, transaksi baru masuk
+python -m etl.simulate_channel    # tambah sesi login (MySQL) dan log aktivitas (MongoDB) baru
+python -m etl.run_pipeline        # hanya data baru yang dimuat
 ```
 
 Hasil pengujian:
@@ -228,6 +262,8 @@ Hasil pengujian:
 | Load awal | 20.000 transaksi dimuat, semua data quality check lulus |
 | Run ulang | 0 baris baru, 0 versi SCD2 baru |
 | Setelah simulasi | 10 versi SCD2 ditutup dan dibuat baru, 594 transaksi baru masuk, rekonsiliasi sumber = fact (20.594 baris) |
+| Load sumber channel | 292 akun mobile, 2.336 sesi login, dan 5.000 log aktivitas dimuat; semua data quality check lulus |
+| Incremental channel | 100 sesi login dan 100 log baru masuk; rekonsiliasi sumber = fact |
 
 Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window function `RANK` dan `LAG`) ada di [`docs/verification_queries.sql`](docs/verification_queries.sql).
 
@@ -244,12 +280,16 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 ├── .env.example
 ├── data_generator/             # generator data sintetis
 ├── etl/                        # pipeline ETL
-│   ├── extract.py
+│   ├── extract.py              # sumber PostgreSQL
+│   ├── extract_channel.py      # sumber MySQL dan MongoDB
 │   ├── transform_load.py
+│   ├── load_channel.py
 │   ├── data_quality.py
+│   ├── data_quality_channel.py
 │   ├── audit.py
 │   ├── run_pipeline.py
 │   ├── simulate_changes.py
+│   ├── simulate_channel.py
 │   └── sql/staging.sql
 ├── api/                        # REST API (Spring Boot)
 │   └── src/main/java/dev/minibank/api/
@@ -265,7 +305,7 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 │   ├── source_postgres/        #   (dijalankan otomatis saat container pertama kali dibuat)
 │   ├── source_mysql/
 │   ├── dwh/
-│   └── ops/                    #   skrip manual: user read-only API, semantic layer
+│   └── ops/                    #   skrip manual: user read-only API, semantic layer, golden record
 └── docs/
     ├── INGESTION_STANDARD.md
     ├── verification_queries.sql
@@ -283,13 +323,17 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 - **`JdbcTemplate` dipilih, bukan JPA**, karena query berupa join star schema yang bersifat analitik dan hanya-baca, sehingga SQL langsung lebih jelas dan mudah dioptimasi.
 - **Semantic layer berupa view**: metrik didefinisikan sekali dan dipakai semua laporan; BI tool hanya melihat view, bukan tabel mentah.
 - **ETL dan data virtualization dipakai bersama**: ETL untuk data yang sering dianalisis (performa stabil, tanpa membebani sumber), Trino untuk analisis cepat lintas sistem tanpa menyalin data.
+- **Golden record berupa view di semantic layer**: satu definisi profil nasabah dipakai API dan BI, dan selalu mengikuti data terbaru di DWH.
+- **Fakta channel memakai `id_nasabah` (business key)**, bukan surrogate key versi nasabah, karena sumbernya tidak mencatat versi nasabah.
 
 ## Keterbatasan yang diketahui
 
 - Watermark berbasis `id_transaksi` tidak menangkap perubahan pada transaksi lama atau data yang datang terlambat.
 - Kolom `loaded` pada dimensi SCD Type 1 menghitung baris yang di-upsert, bukan yang benar-benar berubah.
 - Orkestrasi ETL masih manual (belum ada penjadwalan otomatis).
-- MySQL dan MongoDB belum dimuat ke DWH (hanya bisa dibaca lewat Trino).
+- Fakta channel (`fact_sesi_login`, `fact_aktivitas`) belum terhubung ke versi historis nasabah, sehingga analisis per segmen pada saat kejadian hanya tersedia untuk transaksi.
+- Watermark MongoDB memakai `_id`, sehingga dokumen lama yang diubah tidak ikut diperbarui.
+- Golden record menganggap satu nasabah punya paling banyak satu akun mobile banking.
 - API belum punya autentikasi/otorisasi, unit test, caching, dan dokumentasi OpenAPI/Swagger.
 - Dashboard dibuat manual di Metabase dan belum disimpan sebagai kode; Metabase memakai database internal H2 (cukup untuk demo, bukan produksi).
 - Trino dikunci read-only di level sistem, tetapi catalog `core`, `mysql`, dan `mongodb` masih memakai akun pemilik database. Untuk produksi, gunakan user read-only per sumber.
@@ -302,5 +346,6 @@ Kumpulan query untuk memverifikasi hasil (riwayat SCD2, audit log, window functi
 - Hanya data sintetis, tidak ada data pribadi asli.
 - NIK disimpan dalam bentuk masking.
 - Kredensial dibaca dari `.env` dan tidak masuk Git (`.env` ada di `.gitignore`); konfigurasi Trino membaca password lewat `${ENV:...}`.
-- Koneksi ETL ke sumber bersifat read-only.
+- Koneksi ETL ke PostgreSQL dan MySQL bersifat read-only.
+- Alamat IP dari log aktivitas tidak dimuat ke DWH (data minimization).
 - API memakai user `api_reader` dan BI tool memakai user `bi_reader`, masing-masing dengan hak `SELECT` yang dibatasi; semua nilai query API lewat placeholder (bukan digabung ke string SQL), dan pesan error tidak membocorkan detail internal.

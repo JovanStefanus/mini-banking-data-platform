@@ -23,3 +23,23 @@ def dwh_conn(autocommit=False):
         dbname="dwh", user="dwh_user", password=_env("PG_DWH_PASSWORD", ""))
     conn.autocommit = autocommit
     return conn
+
+
+def mysql_conn():
+    """Koneksi ke channel banking (MySQL). Sesi dibuat read-only."""
+    import mysql.connector
+    conn = mysql.connector.connect(
+        host=_env("MYSQL_HOST", "127.0.0.1"), port=int(_env("MYSQL_PORT", "3307")),
+        database="channel_banking", user="channel_user", password=_env("MYSQL_PASSWORD", ""))
+    cur = conn.cursor()
+    cur.execute("SET SESSION TRANSACTION READ ONLY")
+    cur.close()
+    return conn
+
+
+def mongo_client():
+    """Koneksi ke MongoDB (log aktivitas). ETL hanya membaca."""
+    from pymongo import MongoClient
+    return MongoClient(
+        host=_env("MONGO_HOST", "127.0.0.1"), port=int(_env("MONGO_PORT", "27017")),
+        username="mongo_user", password=_env("MONGO_PASSWORD", ""), authSource="admin")
