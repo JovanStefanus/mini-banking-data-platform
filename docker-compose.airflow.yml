@@ -1,0 +1,27 @@
+# Orkestrasi: Airflow (mode standalone). Dimuat lewat "include" di docker-compose.yml.
+services:
+  airflow:
+    build: ./airflow
+    container_name: mbdp_airflow
+    command: standalone
+    ports: ["127.0.0.1:8090:8080"]   # hanya bisa dibuka dari laptop sendiri
+    mem_limit: 3g                    # batasi memori agar laptop tidak berat
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # Alamat database di dalam jaringan Docker: nama service + port internal
+      PG_CORE_HOST: postgres_core
+      PG_CORE_PORT: "5432"
+      PG_DWH_HOST: postgres_dwh
+      PG_DWH_PORT: "5432"
+      MYSQL_HOST: mysql_channel
+      MYSQL_PORT: "3306"
+      MONGO_HOST: mongo_logs
+      MONGO_PORT: "27017"
+      PG_CORE_PASSWORD: ${PG_CORE_PASSWORD}
+      PG_DWH_PASSWORD: ${PG_DWH_PASSWORD}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MONGO_PASSWORD: ${MONGO_PASSWORD}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./etl:/opt/airflow/project/etl:ro
+      - ./sql:/opt/airflow/project/sql:ro
